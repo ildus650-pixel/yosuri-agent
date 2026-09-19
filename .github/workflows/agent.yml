@@ -1,0 +1,111 @@
+name: Yosuri Agent
+
+# Rescenix Yosuri CLI (rescene) running headlessly on GitHub Actions.
+# Verified: `rescene exec "<task>"` runs non-interactively and needs NO API key —
+# it uses the CLI's built-in free model network ("免 key 模型开箱即用").
+#
+# Optional free keys (not required) unlock more capacity:
+#   SENSENOVA_API_KEY  - SenseTime free tier
+#   MODELSCOPE_API_KEY - ModelScope free tier
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Task for the agent. Leave empty for the default daily briefing."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: yosuri-agent
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rescene CLI
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.rescene"
+          curl -fsSL --retry 3 --retry-delay 5 --max-time 240 \
+            "https://download.shanca.me/rescene-cli/rescene-linux-amd64" \
+            -o "$HOME/.rescene/rescene"
+          chmod +x "$HOME/.rescene/rescene"
+          echo "$HOME/.rescene" >> "$GITHUB_PATH"
+          "$HOME/.rescene/rescene" version 2>&1 | head -3 || true
+
+      - name: Run agent task
+        env:
+          TASK: ${{ github.event.inputs.task }}
+        run: |
+          set -uo pipefail
+          DEFAULT_TASK='Give a short daily briefing for today: 3 notable technology or AI news items, each one sentence. Plain text, under 700 characters. No markdown tables, no code blocks.'
+          T="${TASK:-$DEFAULT_TASK}"
+          echo "::notice::task: $T"
+
+          timeout 1500 rescene exec "$T" > /tmp/raw.txt 2>&1
+          rc=$?
+          echo "rescene_exit=$rc" | tee /tmp/exit.txt
+          echo "::notice::rescene exit code: $rc"
+
+          python3 scripts/clean_output.py /tmp/raw.txt > /tmp/clean.txt
+          echo "--- cleaned output ($(wc -c < /tmp/clean.txt) bytes) ---"
+          head -c 1200 /tmp/clean.txt
+          echo
+
+      - name: Save result
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p runs
+          STAMP="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
+          {
+            echo "# Yosuri agent run — ${STAMP}"
+            echo
+            echo "Task: $(python3 -c "import os;print(os.environ.get('TASK') or 'default daily briefing')" 2>/dev/null || echo 'default')"
+            echo
+            echo '```'
+            cat /tmp/clean.txt 2>/dev/null || echo "(no output)"
+            echo '```'
+          } > "runs/${STAMP}.md"
+          ls -la runs/ | tail -5
+
+      - name: Send result to Telegram
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -uo pipefail
+          if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set - skipping notify"
+            exit 0
+          fi
+          python3 scripts/notify.py /tmp/clean.txt "Yosuri Agent"
+
+      - name: Commit result
+        if: always()
+        run: |
+          set -uo pipefail
+          git config user.name  "yosuri-agent[bot]"
+          git config user.email "yosuri-agent@users.noreply.github.com"
+          if [ -z "$(git status --porcelain runs/ 2>/dev/null)" ]; then
+            echo "nothing to commit"
+            exit 0
+          fi
+          git add -f runs/
+          git commit -q -m "run: yosuri agent $(date -u +%Y-%m-%dT%H:%MZ) [skip ci]"
+          for i in 1 2 3; do
+            git pull --rebase -q --autostash origin main && git push -q && break
+            echo "push attempt $i failed, retrying"; sleep 5
+          done
