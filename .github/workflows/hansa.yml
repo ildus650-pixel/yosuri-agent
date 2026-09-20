@@ -66,11 +66,11 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          mkdir -p hansa
+          mkdir -p hansa memory
           cp /tmp/report.md "hansa/$(date -u +%Y-%m-%dT%H).md" 2>/dev/null || true
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add hansa/ 2>/dev/null || true
+          git add hansa/ memory/ 2>/dev/null || true
           git commit -q -m "hansa: cycle $(date -u +%Y-%m-%dT%H:%MZ)" || echo "nothing to commit"
           git pull --rebase -q origin "${GITHUB_REF_NAME}" || true
           git push -q || echo "push skipped"
