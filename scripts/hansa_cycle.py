@@ -363,6 +363,34 @@ def do_curate(lines, quests):
         lines.append(f"    ! {s}")
 
 
+FLUXA_ID_PATH = os.environ.get("FLUXA_ID_PATH", "memory/fluxa-agent-id.txt")
+
+
+def do_fluxa_bind(lines, onboarding):
+    """Authorising in the browser is only half of it: the agent must still tell
+    Hansa which FluxA agent id it owns, with PUT /api/agents/fluxa-wallet.
+    The workflow extracts that id from the add-agent URL and stores it here."""
+    if isinstance(onboarding, dict) and onboarding.get("has_fluxa"):
+        lines.append("  - wallet already bound")
+        return
+    try:
+        with open(FLUXA_ID_PATH, encoding="utf-8") as fh:
+            fid = fh.read().strip()
+    except Exception:  # noqa: BLE001
+        fid = ""
+    if not fid:
+        lines.append(f"  - no fluxa id yet (waiting on {FLUXA_ID_PATH}; "
+                     f"the operator must open the add-agent link)")
+        return
+    if fid.lower() in ("false", "none"):
+        lines.append(f"  - fluxa id not available yet (stored: {fid!r})")
+        return
+    st, body = http("PUT", "/api/agents/fluxa-wallet",
+                    {"fluxa_agent_id": fid})
+    lines.append(f"  - `PUT /api/agents/fluxa-wallet` ({fid}) -> `{st}` "
+                 f"{brief(body, 200)}")
+
+
 def do_referral(lines, onboarding):
     """Onboarding step 2: POST /api/offers/{id}/ref (one offer id is enough)."""
     if isinstance(onboarding, dict) and onboarding.get("has_ref_link"):
@@ -451,6 +479,7 @@ def main():
     lines.append("*- onboarding*")
     st, ob = http("GET", "/api/agents/onboarding-status")
     lines.append(f"  `{st}` {brief(ob, 400)}")
+    do_fluxa_bind(lines, ob)
     do_referral(lines, ob)
 
     title, body = draft_forum_post(feed, earnings)

@@ -76,6 +76,14 @@ jobs:
             echo "  - OPERATOR ACTION: $u" >> /tmp/report.md
           done
           sed -n '1,12p' "$W" | sed 's/^/  /' >> /tmp/report.md
+          # Bind the wallet: the agent must report its own FluxA agent id.
+          # The operator's browser authorisation alone does not flip has_fluxa.
+          mkdir -p memory
+          {
+            grep -oE 'agentId=[0-9a-fA-F-]{36}' "$W" | head -1 | cut -d= -f2
+            grep -oE '[0-9a-fA-F-]{36}' "$W" | head -1
+          } | grep -m1 . > memory/fluxa-agent-id.txt || echo "none" > memory/fluxa-agent-id.txt
+          echo "  - fluxa id stored: $(cat memory/fluxa-agent-id.txt)" >> /tmp/report.md
 
       - name: Send report to Telegram
         if: always()
