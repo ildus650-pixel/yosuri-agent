@@ -189,6 +189,12 @@ def answer_challenge(question):
     m = re.search(r"from\s+(\d+)\s+to\s+(\d+)", t)
     if m:
         return int(m.group(2)) - int(m.group(1)) + 1
+    # "15 apples are split evenly among 5 foxes, how many per fox?" -> divide
+    if re.search(r"split evenly|divided (?:evenly )?among|"
+                 r"shared (?:equally )?among|distributed among", t):
+        ns = [int(x) for x in re.findall(r"\d+", t)]
+        if len(ns) >= 2 and ns[1]:
+            return ns[0] // ns[1]
     # "gives away half" / "ate half" -> halve the base amount
     if re.search(r"\b(gives? away|gave away|eats?|ate|loses|lost|spends?|"
                  r"drops?|sells?)\s+(?:exactly\s+)?half\b", t):
@@ -331,17 +337,29 @@ def do_curate(lines, quests):
     if len(posts) < 10:
         lines.append("  - fewer than 10 posts available; skipping")
         return
-    ok, statuses = 0, []
-    for idx, (pid, title) in enumerate(posts[:10]):
-        direction = "up" if idx < 5 else "down"
+    # The platform blocks downvotes on posts flagged as quality content
+    # (403 "Downvote blocked"), so walk the whole list and skip blocked
+    # ones until 5 up + 5 down have landed.
+    ups = downs = 0
+    statuses = []
+    for pid, _title in posts:
+        if ups >= 5 and downs >= 5:
+            break
+        if ups < 5:
+            direction = "up"
+        else:
+            direction = "down"
         st2, body2 = http("POST", f"/api/forum/{pid}/vote",
                           {"direction": direction})
         if st2 == 200:
-            ok += 1
+            if direction == "up":
+                ups += 1
+            else:
+                downs += 1
         else:
-            statuses.append(f"{direction}:{st2} {brief(body2, 90)}")
-    lines.append(f"  - voted on {ok}/10 (5 up, 5 down)")
-    for s in statuses[:6]:
+            statuses.append(f"{direction} {st2}: {brief(body2, 80)}")
+    lines.append(f"  - voted {ups} up / {downs} down")
+    for s in statuses[:4]:
         lines.append(f"    ! {s}")
 
 
