@@ -64,6 +64,25 @@ def call(method, url, body=None, headers=None, timeout=45):
         return 0, {"_error": f"{type(e).__name__}: {e}"}
 
 
+def call_follow(url, timeout=45):
+    """GET a link the way a mail client would, reporting the final URL.
+
+    Returns (status, body-or-text, final_url)."""
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("User-Agent", UA)
+    req.add_header("Accept", "text/html,application/json;q=0.9,*/*;q=0.8")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read().decode("utf-8", "replace")
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            body = _json(raw) if "json" in ctype else raw
+            return r.status, body, r.geturl()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")[:300], url
+    except Exception as e:  # noqa: BLE001
+        return 0, f"{type(e).__name__}: {e}", url
+
+
 def _json(raw):
     try:
         return json.loads(raw)
@@ -118,8 +137,32 @@ def make_mailbox():
     return address, tok["token"], None
 
 
+def text_of(html):
+    """Rough HTML -> text, enough to read what a confirmation page says."""
+    t = re.sub(r"(?is)<(script|style).*?</\1>", " ", html)
+    t = re.sub(r"(?s)<[^>]+>", " ", t)
+    t = t.replace("&nbsp;", " ").replace("&amp;", "&")
+    return " ".join(t.split())[:220]
+
+
+def score_url(u):
+    """Prefer a link that looks like a confirmation over footer/logo links."""
+    low = u.lower()
+    s = 0
+    for good in ("token", "confirm", "verify", "magic", "email"):
+        if good in low:
+            s += 2
+    if "agenthansa" in low:
+        s += 1
+    for bad in ("unsubscribe", "twitter", "discord", "logo", "assets/",
+                "privacy", "terms", "impact"):
+        if bad in low:
+            s -= 3
+    return s
+
+
 def find_link(token, attempts=18, every=5):
-    """Poll the mailbox for the magic link."""
+    """Poll the mailbox for the magic link, reporting what was actually seen."""
     for i in range(attempts):
         time.sleep(every)
         st, msgs = call("GET", MAILTM + "/messages", None,
@@ -127,17 +170,24 @@ def find_link(token, attempts=18, every=5):
         items = items_of(msgs, "messages")
         if items:
             mid = items[0].get("id") if isinstance(items[0], dict) else None
+            subject = items[0].get("subject") if isinstance(items[0], dict) else ""
             if not mid:
                 return None, f"message without an id: {short(items[0], 140)}"
             st2, full = call("GET", f"{MAILTM}/messages/{mid}", None,
                              {"Authorization": "Bearer " + token})
             blob = json.dumps(full, ensure_ascii=False) if isinstance(
                 full, (dict, list)) else str(full)
-            for m in re.finditer(r"https?://[^\s\"'<>)]+", blob):
-                u = m.group().replace("&amp;", "&").rstrip(".")
-                if "agenthansa" in u or "magic" in u or "verify" in u:
-                    return u, f"link found after {(i + 1) * every}s"
-            return None, f"message arrived but held no link: {short(full, 200)}"
+            urls = []
+            for m in re.finditer(r"https?://[^\s\"'<>)\\]+", blob):
+                u = m.group().replace("&amp;", "&").rstrip(".,")
+                if u not in urls:
+                    urls.append(u)
+            return {
+                "subject": subject,
+                "urls": urls,
+                "in": f"{(i + 1) * every}s",
+                "detail": short(full, 300),
+            }, None
     return None, f"no mail within {attempts * every}s"
 
 
@@ -183,11 +233,25 @@ def main():
         out.append("  - magic link sent to the operator's address; click it, "
                    "then re-read the status")
     else:
-        link, why = find_link(token)
-        out.append(f"  {why}")
-        if link:
-            st, clicked = call("GET", link)
-            out.append(f"  clicked: `{st}` {short(clicked, 160)}")
+        mail, why = find_link(token)
+        if why:
+            out.append(f"  {why}")
+        if mail:
+            out.append(f"  mail: {mail['subject']!r} at {mail['in']}, "
+                       f"{len(mail['urls'])} link(s)")
+            ranked = sorted(mail["urls"], key=score_url, reverse=True)
+            for u in ranked[:4]:
+                out.append(f"    [{score_url(u):>2}] {u[:120]}")
+            if ranked and score_url(ranked[0]) > 0:
+                link = ranked[0]
+                st, clicked, final = call_follow(link)
+                out.append(f"  clicked: `{st}` final={final}")
+                if isinstance(clicked, str):
+                    out.append(f"    page says: {text_of(clicked)[:200]}")
+                else:
+                    out.append(f"    body: {short(clicked, 200)}")
+            else:
+                out.append("    no link scored as a confirmation link")
 
     time.sleep(3)
     st, after = hansa("GET", "/api/agents/me/email/status")
