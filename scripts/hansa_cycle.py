@@ -29,9 +29,16 @@ WORDS = {
     "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
     "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
 }
-SUB = ("fewer", "less", "loses", "lost", "minus", "away", "left", "eats")
+SUB = ("fewer", "less", "loses", "lost", "minus", "away", "left", "eats",
+       "spends", "drops", "gives", "breaks", "sells")
 MUL = ("each", "per", "times", "every")
-ADD = ("more", "gains", "gain", "plus", "additional", "another", "gets")
+ADD = ("more", "gains", "gain", "plus", "additional", "another", "gets",
+       "finds", "found", "receives", "collects", "wins", "buys", "adds")
+# Unary modifiers applied to the number they sit in front of:
+# "A captain doubles its 2 coins" -> that 2 becomes 4.
+UNARY = ((("doubles", "double", "twice"), 2.0),
+         (("triples", "triple"), 3.0),
+         (("halves", "half"), 0.5))
 
 
 def http(method, path, body=None, timeout=45):
@@ -75,18 +82,39 @@ def answer_challenge(question):
     if len(nums) == 1:
         return nums[0][2]
 
-    total = nums[0][2]
-    for i in range(1, len(nums)):
+    total = None
+    for i in range(len(nums)):
         # Nearest keyword wins. In "gains 3 more and loses 1" the "loses"
         # belongs to the *next* pair, so a plain "keyword anywhere in the
         # window" test reads 3 as a subtraction. Proximity fixes that.
-        before = re.findall(r"[a-z]+", t[nums[i - 1][1]:nums[i][0]])[::-1]
+        prev_end = nums[i - 1][1] if i else 0
+        before = re.findall(r"[a-z]+", t[prev_end:nums[i][0]])[::-1]
         after = re.findall(r"[a-z]+", t[nums[i][1]:nums[i][1] + 24])
+
+        # Unary modifier. "doubles its 2 coins" scales the *number*;
+        # "halves them" scales the running *total*, so the following pronoun
+        # decides where the factor lands.
+        v = float(nums[i][2])
+        for words_, factor in UNARY:
+            hit = next((k for k, w in enumerate(before) if w in words_), None)
+            if hit is None:
+                continue
+            after_unary = before[hit - 1] if hit >= 1 else ""
+            if after_unary in ("them", "it", "those", "these") and total is not None:
+                total *= factor
+            else:
+                v *= factor
+            break
+
+        if total is None:
+            total = v
+            continue
+
         op = None
         for d in (0, 1, 2):
-            for words in (before, after):
-                if d < len(words):
-                    w = words[d]
+            for words_ in (before, after):
+                if d < len(words_):
+                    w = words_[d]
                     if w in SUB:
                         op = "sub"
                     elif w in MUL:
@@ -97,29 +125,43 @@ def answer_challenge(question):
                         break
             if op:
                 break
-        v = nums[i][2]
         total = total - v if op == "sub" else \
             total * v if op == "mul" else total + v
-    return total
+
+    return int(total) if total is not None and float(total).is_integer() \
+        else None
 
 
-def do_checkin(lines):
-    st, body = http("POST", "/api/agents/checkin")
-    lines.append(f"- checkin: `{st}` {brief(body)}")
-    if isinstance(body, dict) and body.get("status") == "challenge_required":
-        ans = answer_challenge(body.get("question"))
-        lines.append(f"  - challenge: {body.get('question')!r}")
-        lines.append(f"  - solved: `{ans}`")
+def do_checkin(lines, attempts=3):
+    """Check in, solving the challenge. Retries with a *new* challenge if the
+    answer is rejected - the API explicitly offers that ("Wrong answer. Call
+    POST /api/agents/checkin again for a new challenge"), which makes an
+    unseen template a retry rather than a failure."""
+    for n in range(1, attempts + 1):
+        st, body = http("POST", "/api/agents/checkin")
+        if not isinstance(body, dict):
+            lines.append(f"  - attempt {n}: `{st}` {brief(body)}")
+            continue
+        if body.get("status") != "challenge_required":
+            lines.append(f"  - attempt {n}: `{st}` {brief(body)}")
+            return  # already checked in, nothing to solve
+        q = body.get("question")
+        ans = answer_challenge(q)
+        lines.append(f"  - attempt {n}: {q!r} -> `{ans}`")
         if ans is None:
-            lines.append("  - SKIPPED: no numbers parsed")
-            return
+            continue  # unparsed template; a fresh challenge may parse
         st2, body2 = http("POST", "/api/agents/checkin/verify",
                           {"challenge_id": body.get("challenge_id"),
                            "challenge_answer": ans})
-        lines.append(f"  - verify: `{st2}` {brief(body2)}")
+        lines.append(f"    verify `{st2}`: {brief(body2, 200)}")
+        if st2 == 200:
+            return
         if st2 == 429:
-            lines.append("  - NOTE: rate limited by Agent Hansa (per-IP). "
-                         "Will retry on the next cycle.")
+            lines.append("    NOTE: rate limited by Agent Hansa (per-IP) - "
+                         "will retry next cycle.")
+            return
+        time.sleep(2)
+    lines.append("  - gave up after retries; no change this cycle")
 
 
 def brief(obj, limit=260):
