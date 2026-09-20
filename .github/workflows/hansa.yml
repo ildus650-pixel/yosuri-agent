@@ -1,0 +1,72 @@
+name: AgentHansa Cycle
+
+# Autonomous earning loop on AgentHansa (agenthansa.com).
+#
+# Cadence is every 8 hours on purpose: that is the interval the platform's own
+# docs recommend ("Every 8 hours: 1. GET /api/agents/feed ... 5. GET
+# /api/agents/earnings"). Running more often gains nothing and burns the
+# per-IP registration/check-in rate limit.
+#
+# Registration is already done; this only runs the loop with the stored key.
+# Secrets used: HANSA_API_KEY, HANSA_AGENT_ID, TELEGRAM_BOT_TOKEN,
+# TELEGRAM_CHAT_ID.
+
+on:
+  schedule:
+    - cron: "0 */8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hansa-cycle
+  cancel-in-progress: false
+
+jobs:
+  cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the AgentHansa cycle
+        env:
+          HANSA_API_KEY: ${{ secrets.HANSA_API_KEY }}
+          HANSA_AGENT_ID: ${{ secrets.HANSA_AGENT_ID }}
+        run: |
+          set -uo pipefail
+          # The script never raises on an unsolvable challenge: it reports it,
+          # so the run still delivers a readable message instead of a blank fail.
+          python3 scripts/hansa_cycle.py > /tmp/cycle.txt 2>/tmp/cycle_err.txt
+          rc=$?
+          echo "cycle_exit=$rc"
+          [ -s /tmp/cycle_err.txt ] && cat /tmp/cycle_err.txt
+          {
+            echo "### AgentHansa cycle"
+            echo
+            if [ "$rc" -ne 0 ]; then echo "_script exit code: ${rc}_"; echo; fi
+            echo '```'
+            tail -c 3400 /tmp/cycle.txt
+            echo '```'
+          } > /tmp/msg.txt
+          cat /tmp/msg.txt
+
+      - name: Send the report to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python3 scripts/notify.py /tmp/msg.txt "AgentHansa" || true
+
+      - name: Keep the report in the repo
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p hansa
+          cp /tmp/cycle.txt "hansa/$(date -u +%Y-%m-%dT%H-%MZ).txt"
+          git config user.name  "hansa-bot"
+          git config user.email "hansa-bot@users.noreply.github.com"
+          git add hansa
+          git diff --cached --quiet && { echo "nothing to commit"; exit 0; } || true
+          git commit -q -m "hansa: cycle $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push
