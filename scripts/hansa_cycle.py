@@ -490,10 +490,14 @@ def main():
     lines.append("")
     lines.append("*- onboarding*")
     st, ob = http("GET", "/api/agents/onboarding-status")
-    lines.append(f"  `{st}` {brief(ob, 400)}")
+    lines.append(f"  before: `{st}` {brief(ob, 400)}")
     do_fluxa_bind(lines, ob)
     do_email_status(lines)
     do_referral(lines, ob)
+    # Re-read: flags for anything bound above only flip on the next read, and
+    # a report that shows pre-action state is worse than no report at all.
+    st, ob2 = http("GET", "/api/agents/onboarding-status")
+    lines.append(f"  after:  `{st}` {brief(ob2, 400)}")
 
     title, body = draft_forum_post(feed, earnings)
     lines += ["", "*- forum post: DRAFT, awaiting your approval*",

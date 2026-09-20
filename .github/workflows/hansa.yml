@@ -7,8 +7,15 @@ name: Hansa Cycle
 #   GET  /api/agents/daily-quests    quest bonus progress
 #   GET  /api/agents/earnings        balance
 #
-# The check-in challenge is solved locally by scripts/hansa_cycle.py
-# (13/13 on the observed templates before this workflow was committed).
+# Step order matters: the wallet step runs BEFORE the cycle, because the cycle
+# registers the FluxA agent id with Hansa. Running it afterwards means every
+# cycle registers the id one run late.
+#
+# Repository variables:
+#   HANSA_WALLET_LINK = "1"  -> also run link-wallet (ties the agent to the
+#                               operator's wallet). Hansa allows ONE agent per
+#                               wallet, so leave this off for a fleet.
+#   HANSA_EMAIL_BIND  = "1"  -> claim the $0.50 verified-email bonus
 #
 # Secrets required: HANSA_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
@@ -40,6 +47,54 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: FluxA wallet
+        continue-on-error: true
+        env:
+          WALLET_LINK: ${{ vars.HANSA_WALLET_LINK }}
+        run: |
+          set -uo pipefail
+          : > /tmp/wallet.md
+          echo "*- FluxA wallet*" >> /tmp/wallet.md
+          W=/tmp/wallet.txt
+          ID=memory/fluxa-agent-id.txt
+          mkdir -p memory
+          if [ ! -s "$ID" ] || ! grep -qE '^[0-9a-fA-F-]{36}$' "$ID"; then
+            # init mints a fresh FluxA agent wallet. Run once per agent; a
+            # second init would mint a NEW id and orphan the previous one.
+            timeout 150 npx --yes @fluxa-pay/fluxa-wallet@latest init \
+              --name "${{ github.event.repository.name }}" \
+              --client "github-actions" > "$W" 2>&1 || true
+            if [ "${WALLET_LINK:-0}" = "1" ]; then
+              timeout 150 npx --yes @fluxa-pay/fluxa-wallet@latest link-wallet >> "$W" 2>&1 || true
+            fi
+            FOUND=$(grep -oE 'agentId=[0-9a-fA-F-]{36}' "$W" | head -1 | cut -d= -f2 || true)
+            [ -z "$FOUND" ] && FOUND=$(grep -oE '[0-9a-fA-F-]{36}' "$W" | head -1 || true)
+            printf '%s' "${FOUND:-none}" > "$ID"
+          else
+            echo "already initialised: $(cat "$ID")" > "$W"
+          fi
+          grep -oE 'https?://[^ "'"'"'<>]+' "$W" | sort -u | head -4 | while read -r u; do
+            echo "  - OPERATOR ACTION: $u" >> /tmp/wallet.md
+          done
+          sed -n '1,10p' "$W" | sed 's/^/  /' >> /tmp/wallet.md
+          echo "  - agent wallet id: $(cat "$ID")" >> /tmp/wallet.md
+          cat /tmp/wallet.md
+
+      - name: Email bonus (one claim per agent)
+        if: ${{ vars.HANSA_EMAIL_BIND == '1' }}
+        continue-on-error: true
+        env:
+          HANSA_API_KEY: ${{ secrets.HANSA_API_KEY }}
+          AGENT_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -uo pipefail
+          python3 scripts/email_bind.py > /tmp/email.md 2>&1 || true
+          cat /tmp/email.md
+
       - name: Run Hansa cycle
         id: cycle
         env:
@@ -50,46 +105,17 @@ jobs:
           set -uo pipefail
           python3 scripts/hansa_cycle.py > /tmp/report.md 2>/tmp/err.txt
           echo "exit=$?"
-          echo "--- report ---"
           cat /tmp/report.md
           if [ -s /tmp/err.txt ]; then echo "--- stderr ---"; tail -20 /tmp/err.txt; fi
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: FluxA wallet (operator authorization link)
-        continue-on-error: true
+      - name: Assemble report
+        if: always()
         run: |
           set -uo pipefail
-          echo "" >> /tmp/report.md
-          echo "*- FluxA wallet*" >> /tmp/report.md
-          W=/tmp/wallet.txt
-          ID=memory/fluxa-agent-id.txt
-          mkdir -p memory
-          # Init is destructive-ish: it mints a NEW FluxA agent id, which
-          # invalidates an authorisation the operator already gave. Do it at
-          # most once, ever, tracked by a committed marker.
-          if [ ! -s "$ID" ] || ! grep -qE '^[0-9a-fA-F-]{36}$' "$ID"; then
-            timeout 120 npx --yes @fluxa-pay/fluxa-wallet@latest status  > "$W" 2>&1 || true
-            if ! grep -qE '[0-9a-fA-F-]{36}' "$W"; then
-              timeout 180 npx --yes @fluxa-pay/fluxa-wallet@latest init \
-                --name "${{ github.event.repository.name }}" \
-                --client "github-actions" >> "$W" 2>&1 || true
-            fi
-            timeout 120 npx --yes @fluxa-pay/fluxa-wallet@latest link-wallet >> "$W" 2>&1 || true
-            # add-agent URL, else the first bare uuid
-            FOUND=$(grep -oE 'agentId=[0-9a-fA-F-]{36}' "$W" | head -1 | cut -d= -f2 || true)
-            [ -z "$FOUND" ] && FOUND=$(grep -oE '[0-9a-fA-F-]{36}' "$W" | head -1 || true)
-            printf '%s' "${FOUND:-none}" > "$ID"
-          else
-            echo "fluxa id already stored" > "$W"
-          fi
-          grep -oE 'https?://[^ "'"'"'<>]+' "$W" | sort -u | head -4 | while read -r u; do
-            echo "  - OPERATOR ACTION: $u" >> /tmp/report.md
-          done
-          sed -n '1,12p' "$W" | sed 's/^/  /' >> /tmp/report.md
-          echo "  - fluxa id stored: $(cat memory/fluxa-agent-id.txt)" >> /tmp/report.md
+          { cat /tmp/report.md 2>/dev/null || echo "(no cycle report)"; \
+            cat /tmp/email.md 2>/dev/null || true; \
+            cat /tmp/wallet.md 2>/dev/null || true; } > /tmp/full.md
+          mv /tmp/full.md /tmp/report.md
 
       - name: Send report to Telegram
         if: always()
