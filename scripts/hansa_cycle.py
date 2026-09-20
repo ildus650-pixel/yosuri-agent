@@ -50,6 +50,13 @@ UNARY = ((("doubles", "double", "twice"), 2.0),
          (("triples", "triple"), 3.0),
          (("halves", "half"), 0.5))
 WAF_MARKERS = ("waf_block", "waf block", "forbidden")
+# "shares half" is generated too, but the original list only had the verbs
+# gives-away/eats/loses/... so that question was answered with the un-halved
+# total (14 instead of 7).
+HALF_RE = re.compile(
+    r"\b(?:gives?\s+away|gave\s+away|shares?|shared|eats?|ate|loses?|lost|"
+    r"spends?|drops?|sells?|uses?|burns?|pays?|keeps?|hands?\s+over)\s+"
+    r"(?:exactly\s+)?half\b")
 
 
 # --------------------------------------------------------------------------
@@ -165,6 +172,86 @@ def safe_json(raw):
 # --------------------------------------------------------------------------
 # Challenge solver
 # --------------------------------------------------------------------------
+def _numbers(t):
+    return [(m.start(), m.end(), int(m.group())) for m in re.finditer(r"\d+", t)]
+
+
+def _fold(nums, t, total, floor=0):
+    """Accumulate `nums` onto `total`, reading the surrounding words to pick
+    each operation. `floor` is where the "before" window starts for the first
+    number, so a segment that follows a split still sees its own context."""
+    def unary_at(pairs):
+        """First unary verb in `pairs` as (index, absolute offset, factor)."""
+        for k, (pos, w) in enumerate(pairs):
+            for stems, factor in UNARY:
+                if w in stems:
+                    return k, pos, factor
+        return None, None, None
+
+    consumed = -1  # end offset of the last unary verb already spent
+    for i, (start, end, val) in enumerate(nums):
+        prev_end = nums[i - 1][1] if i else floor
+        before_ws = [(prev_end + m.start(), m.group())
+                     for m in re.finditer(r"[a-z]+", t[prev_end:start])]
+        after_ws = [(end + m.start(), m.group())
+                    for m in re.finditer(r"[a-z]+", t[end:end + 28])]
+        # Closest word first, with offsets kept for the unary guard. The op
+        # search needs plain words - feeding it the pairs silently matched
+        # nothing, so "loses 5" was added instead of subtracted.
+        before = list(reversed(before_ws))
+        before_words = [w for _, w in before]
+        after_words = [w for _, w in after_ws]
+
+        v = float(val)
+        # Unary before the number: "doubles its 2 coins" scales that number,
+        # but a pronoun object ("doubles them") scales the running total.
+        k, pos, factor = unary_at(before)
+        if k is not None and pos >= consumed:
+            nxt = before[k - 1][1] if k >= 1 else ""
+            if nxt in ("them", "it", "those", "these") and total is not None:
+                total *= factor
+                consumed = pos + len(before[k][1])
+                continue
+            v *= factor
+            consumed = pos + len(before[k][1])
+        # Unary after the number: "has 4 mice and triples them" acts on the
+        # amount gathered so far, since the verb's object is the total.
+        # `consumed` stops the same verb being counted again for the next
+        # number, which doubles it a second time otherwise.
+        k, pos, factor = unary_at(after_ws)
+        if k is not None and pos >= consumed:
+            if total is None:
+                total = v
+            total *= factor
+            consumed = pos + len(after_ws[k][1])
+            continue
+
+        if total is None:
+            total = v
+            continue
+
+        # Nearest keyword wins, and the word right after the number is nearer
+        # than the one before it: "finds 12 fewer" is a loss, not a gain.
+        op = None
+        for d in (0, 1, 2):
+            for words_ in (after_words, before_words):
+                if d < len(words_):
+                    w = words_[d]
+                    if w in SUB:
+                        op = "sub"
+                    elif w in MUL:
+                        op = "mul"
+                    elif w in ADD:
+                        op = "add"
+                    if op:
+                        break
+            if op:
+                break
+        total = total - v if op == "sub" else \
+            total * v if op == "mul" else total + v
+    return total
+
+
 def answer_challenge(question):
     """Solve the generated math word problems. Returns int or None.
 
@@ -195,60 +282,32 @@ def answer_challenge(question):
         ns = [int(x) for x in re.findall(r"\d+", t)]
         if len(ns) >= 2 and ns[1]:
             return ns[0] // ns[1]
-    # "gives away half" / "ate half" -> halve the base amount
-    if re.search(r"\b(gives? away|gave away|eats?|ate|loses|lost|spends?|"
-                 r"drops?|sells?)\s+(?:exactly\s+)?half\b", t):
-        m = re.search(r"\d+", t)
-        return int(m.group()) // 2 if m else None
+    # A "half" phrase splits the sum where it stands: numbers before it
+    # accumulate, the running total is halved, numbers after it keep
+    # accumulating. "collects 9 ... then 5 ..., then shares half" -> (9+5)/2 = 7.
+    # Halving the running total (not the first number) is what makes that case
+    # right; the old rule returned 9 // 2 for it and 14 for the total.
+    hm = HALF_RE.search(t)
+    if hm:
+        # Mask the phrase (same length, so offsets hold) before folding:
+        # "half" is also a unary stem, and leaving it visible halves the
+        # running total a second time - 12 became 3 instead of 6.
+        masked = t[:hm.start()] + " " * (hm.end() - hm.start()) + t[hm.end():]
+        nums = _numbers(masked)
+        head = [n for n in nums if n[1] <= hm.start()]
+        tail = [n for n in nums if n[0] >= hm.end()]
+        total = _fold(head, masked, None)
+        if total is None:
+            return None
+        total = _fold(tail, masked, total / 2.0, floor=hm.end())
+        return int(total) if float(total).is_integer() else None
 
-    nums = [(m.start(), m.end(), int(m.group())) for m in re.finditer(r"\d+", t)]
+    nums = _numbers(t)
     if not nums:
         return None
-    if len(nums) == 1:
-        return nums[0][2]
-
-    total = None
-    for i in range(len(nums)):
-        prev_end = nums[i - 1][1] if i else 0
-        before = re.findall(r"[a-z]+", t[prev_end:nums[i][0]])[::-1]
-        after = re.findall(r"[a-z]+", t[nums[i][1]:nums[i][1] + 24])
-
-        # Unary: "doubles its 2 coins" scales the number, "halves them"
-        # scales the running total - the following pronoun decides.
-        v = float(nums[i][2])
-        for words_, factor in UNARY:
-            hit = next((k for k, w in enumerate(before) if w in words_), None)
-            if hit is None:
-                continue
-            nxt = before[hit - 1] if hit >= 1 else ""
-            if nxt in ("them", "it", "those", "these") and total is not None:
-                total *= factor
-            else:
-                v *= factor
-            break
-
-        if total is None:
-            total = v
-            continue
-
-        op = None
-        for d in (0, 1, 2):
-            for words_ in (before, after):
-                if d < len(words_):
-                    w = words_[d]
-                    if w in SUB:
-                        op = "sub"
-                    elif w in MUL:
-                        op = "mul"
-                    elif w in ADD:
-                        op = "add"
-                    if op:
-                        break
-            if op:
-                break
-        total = total - v if op == "sub" else \
-            total * v if op == "mul" else total + v
-
+    # No single-number shortcut: "has 4 mice and triples them" is one number
+    # and still needs the unary verb applied.
+    total = _fold(nums, t, None)
     return int(total) if total is not None and float(total).is_integer() else None
 
 
