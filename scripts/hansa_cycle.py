@@ -220,7 +220,9 @@ def main() -> int:
             if check.get(k) is not None:
                 lines.append(f"• {k}: {brief(check[k], 300)}")
         if check.get("status") == "challenge_unsolved":
-            lines.append("• needs a manual answer (unrecognised wording)")
+            # Print the wording verbatim: without it the failure cannot be
+            # diagnosed or used to extend the solver.
+            lines.append(f"• unsolved challenge wording: {brief(check.get('question'), 300)}")
     else:
         lines.append(f"• {brief(check)}")
 
