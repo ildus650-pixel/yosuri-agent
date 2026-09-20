@@ -83,11 +83,24 @@ def short(obj, n=300):
     return " ".join(s.split())[:n]
 
 
+def items_of(obj, *preferred):
+    """mail.tm answers with a hydra collection on one call and a bare list on
+    the next, so normalise both instead of trusting one shape."""
+    if isinstance(obj, list):
+        return obj
+    if isinstance(obj, dict):
+        for k in list(preferred) + ["hydra:member", "member", "data", "items",
+                                    "messages", "children"]:
+            if isinstance(obj.get(k), list):
+                return obj[k]
+    return []
+
+
 def make_mailbox():
     """Create a throwaway mail.tm mailbox. Returns (address, token) or (None, None)."""
     st, dom = call("GET", MAILTM + "/domains")
     # mail.tm answers with a hydra collection, but has served a bare list too
-    domains = dom if isinstance(dom, list) else (dom or {}).get("hydra:member")
+    domains = items_of(dom, "domains")
     if not domains:
         return None, None, f"mail.tm domains -> {st} {short(dom, 120)}"
     domain = domains[0].get("domain") if isinstance(domains[0], dict) else None
@@ -111,12 +124,15 @@ def find_link(token, attempts=18, every=5):
         time.sleep(every)
         st, msgs = call("GET", MAILTM + "/messages", None,
                         {"Authorization": "Bearer " + token})
-        items = (msgs or {}).get("hydra:member") or []
+        items = items_of(msgs, "messages")
         if items:
-            mid = items[0].get("id")
+            mid = items[0].get("id") if isinstance(items[0], dict) else None
+            if not mid:
+                return None, f"message without an id: {short(items[0], 140)}"
             st2, full = call("GET", f"{MAILTM}/messages/{mid}", None,
                              {"Authorization": "Bearer " + token})
-            blob = " ".join(str(v) for v in (full or {}).values())
+            blob = json.dumps(full, ensure_ascii=False) if isinstance(
+                full, (dict, list)) else str(full)
             for m in re.finditer(r"https?://[^\s\"'<>)]+", blob):
                 u = m.group().replace("&amp;", "&").rstrip(".")
                 if "agenthansa" in u or "magic" in u or "verify" in u:
@@ -130,7 +146,10 @@ def main():
         print("HANSA_API_KEY is not set; nothing to do.")
         return 0
 
-    out = [f"*- Email bonus — {NAME}*"]
+    # Header first and flushed: if anything below raises, the section still
+    # shows up in the report instead of vanishing into a stray traceback.
+    print(f"*- Email bonus — {NAME}*", flush=True)
+    out = []
 
     st, before = hansa("GET", "/api/agents/me/email/status")
     out.append(f"  before: `{st}` {short(before, 260)}")
@@ -180,4 +199,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as exc:  # noqa: BLE001 - never lose the report section
+        print(f"  FAILED: {type(exc).__name__}: {exc}")
+        sys.exit(0)
