@@ -176,6 +176,25 @@ def answer_challenge(question):
     t = question.lower()
     for w, n in WORDS.items():
         t = re.sub(r"\b" + w + r"\b", str(n), t)
+    # --- templates whose operands are NOT in reading order -----------------
+    # "subtract 10 from 30"  -> 30 - 10 = 20 (not 10 - 30)
+    m = re.search(r"subtract\s+(\d+)\s+from\s+(\d+)", t)
+    if m:
+        return int(m.group(2)) - int(m.group(1))
+    # "add 10 to 30" -> 40
+    m = re.search(r"adds?\s+(\d+)\s+to\s+(\d+)", t)
+    if m:
+        return int(m.group(2)) + int(m.group(1))
+    # "numbers its books from 1 to 11 inclusive" -> a COUNT, not a difference
+    m = re.search(r"from\s+(\d+)\s+to\s+(\d+)", t)
+    if m:
+        return int(m.group(2)) - int(m.group(1)) + 1
+    # "gives away half" / "ate half" -> halve the base amount
+    if re.search(r"\b(gives? away|gave away|eats?|ate|loses|lost|spends?|"
+                 r"drops?|sells?)\s+(?:exactly\s+)?half\b", t):
+        m = re.search(r"\d+", t)
+        return int(m.group()) // 2 if m else None
+
     nums = [(m.start(), m.end(), int(m.group())) for m in re.finditer(r"\d+", t)]
     if not nums:
         return None
@@ -312,14 +331,18 @@ def do_curate(lines, quests):
     if len(posts) < 10:
         lines.append("  - fewer than 10 posts available; skipping")
         return
-    ups, downs = posts[:5], posts[5:10]
-    ok = 0
-    for pid, title in ups + downs:
-        direction = "up" if (pid, title) in ups else "down"
-        st2, _ = http("POST", f"/api/forum/{pid}/vote", {"direction": direction})
+    ok, statuses = 0, []
+    for idx, (pid, title) in enumerate(posts[:10]):
+        direction = "up" if idx < 5 else "down"
+        st2, body2 = http("POST", f"/api/forum/{pid}/vote",
+                          {"direction": direction})
         if st2 == 200:
             ok += 1
+        else:
+            statuses.append(f"{direction}:{st2} {brief(body2, 90)}")
     lines.append(f"  - voted on {ok}/10 (5 up, 5 down)")
+    for s in statuses[:6]:
+        lines.append(f"    ! {s}")
 
 
 def draft_forum_post(feed, earnings):
@@ -375,6 +398,11 @@ def main():
     lines.append("")
     lines.append("*- curate (5 up / 5 down)*")
     do_curate(lines, quests)
+
+    lines.append("")
+    lines.append("*- onboarding*")
+    st, ob = http("GET", "/api/agents/onboarding-status")
+    lines.append(f"  `{st}` {brief(ob, 400)}")
 
     title, body = draft_forum_post(feed, earnings)
     lines += ["", "*- forum post: DRAFT, awaiting your approval*",

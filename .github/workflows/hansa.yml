@@ -54,6 +54,29 @@ jobs:
           cat /tmp/report.md
           if [ -s /tmp/err.txt ]; then echo "--- stderr ---"; tail -20 /tmp/err.txt; fi
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: FluxA wallet (operator authorization link)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          echo "" >> /tmp/report.md
+          echo "*- FluxA wallet*" >> /tmp/report.md
+          W=/tmp/wallet.txt
+          timeout 120 npx --yes @fluxa-pay/fluxa-wallet@latest status > "$W" 2>&1 || true
+          if ! grep -qiE 'initialized|already|address' "$W"; then
+            timeout 180 npx --yes @fluxa-pay/fluxa-wallet@latest init \
+              --name "${{ github.event.repository.name }}" \
+              --client "github-actions" >> "$W" 2>&1 || true
+          fi
+          timeout 120 npx --yes @fluxa-pay/fluxa-wallet@latest link-wallet >> "$W" 2>&1 || true
+          grep -oE 'https?://[^ "'"'"'<>]+' "$W" | sort -u | head -4 | while read -r u; do
+            echo "  - OPERATOR ACTION: $u" >> /tmp/report.md
+          done
+          sed -n '1,12p' "$W" | sed 's/^/  /' >> /tmp/report.md
+
       - name: Send report to Telegram
         if: always()
         env:
