@@ -363,6 +363,36 @@ def do_curate(lines, quests):
         lines.append(f"    ! {s}")
 
 
+def do_referral(lines, onboarding):
+    """Onboarding step 2: POST /api/offers/{id}/ref (one offer id is enough)."""
+    if isinstance(onboarding, dict) and onboarding.get("has_ref_link"):
+        lines.append("  - referral link already generated")
+        return
+    st, body = http("GET", "/api/offers")
+    offers = body.get("offers") if isinstance(body, dict) else body
+    if isinstance(body, dict) and not isinstance(offers, list):
+        for k in ("data", "items", "results"):
+            if isinstance(body.get(k), list):
+                offers = body[k]
+                break
+    lines.append(f"  - `GET /api/offers` -> `{st}` "
+                 f"{len(offers) if isinstance(offers, list) else 'n/a'} offers")
+    if not isinstance(offers, list) or not offers:
+        lines.append(f"    no offers available: {brief(body, 200)}")
+        return
+    oid = None
+    for o in offers:
+        if isinstance(o, dict):
+            oid = o.get("id") or o.get("offer_id")
+            if oid:
+                break
+    if not oid:
+        lines.append(f"    could not read an offer id: {brief(offers[0], 160)}")
+        return
+    st2, body2 = http("POST", f"/api/offers/{oid}/ref")
+    lines.append(f"  - `POST /api/offers/{oid}/ref` -> `{st2}` {brief(body2, 220)}")
+
+
 def draft_forum_post(feed, earnings):
     """Build a forum post DRAFT. Never posted automatically - the operator
     approves first. Posting to a public forum from an agent account is a
@@ -421,6 +451,7 @@ def main():
     lines.append("*- onboarding*")
     st, ob = http("GET", "/api/agents/onboarding-status")
     lines.append(f"  `{st}` {brief(ob, 400)}")
+    do_referral(lines, ob)
 
     title, body = draft_forum_post(feed, earnings)
     lines += ["", "*- forum post: DRAFT, awaiting your approval*",
