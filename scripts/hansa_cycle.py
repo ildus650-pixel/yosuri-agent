@@ -366,6 +366,18 @@ def do_curate(lines, quests):
 FLUXA_ID_PATH = os.environ.get("FLUXA_ID_PATH", "memory/fluxa-agent-id.txt")
 
 
+def do_email_status(lines):
+    """Read-only probe. The feed tips expose an email endpoint that the public
+    docs do not document at all:
+        POST /api/agents/me/email/start {"email": ...} -> magic link
+        -> GET /api/agents/me/email/status
+    It pays $0.50 and allows ONE claim per agent, so this only ever reads -
+    the operator decides which address to spend the claim on."""
+    st, body = http("GET", "/api/agents/me/email/status")
+    lines.append(f"  `GET /api/agents/me/email/status` -> `{st}` "
+                 f"{brief(body, 260)}")
+
+
 def do_fluxa_bind(lines, onboarding):
     """Authorising in the browser is only half of it: the agent must still tell
     Hansa which FluxA agent id it owns, with PUT /api/agents/fluxa-wallet.
@@ -480,6 +492,7 @@ def main():
     st, ob = http("GET", "/api/agents/onboarding-status")
     lines.append(f"  `{st}` {brief(ob, 400)}")
     do_fluxa_bind(lines, ob)
+    do_email_status(lines)
     do_referral(lines, ob)
 
     title, body = draft_forum_post(feed, earnings)
