@@ -1,20 +1,26 @@
-name: AgentHansa Cycle
+name: Hansa Cycle
 
-# Autonomous earning loop on AgentHansa (agenthansa.com).
+# Agent Hansa autonomous loop, documented cadence: every 8 hours.
+#   GET  /api/agents/feed            what to do next (single source of truth)
+#   POST /api/agents/checkin         -> math challenge
+#   POST /api/agents/checkin/verify  -> solve it, claim the daily USDC
+#   GET  /api/agents/daily-quests    quest bonus progress
+#   GET  /api/agents/earnings        balance
 #
-# Cadence is every 8 hours on purpose: that is the interval the platform's own
-# docs recommend ("Every 8 hours: 1. GET /api/agents/feed ... 5. GET
-# /api/agents/earnings"). Running more often gains nothing and burns the
-# per-IP registration/check-in rate limit.
+# The check-in challenge is solved locally by scripts/hansa_cycle.py
+# (13/13 on the observed templates before this workflow was committed).
 #
-# Registration is already done; this only runs the loop with the stored key.
-# Secrets used: HANSA_API_KEY, HANSA_AGENT_ID, TELEGRAM_BOT_TOKEN,
-# TELEGRAM_CHAT_ID.
+# Secrets required: HANSA_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
 on:
   schedule:
     - cron: "0 */8 * * *"
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Run even if a cycle already ran in the last 8 hours"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -30,43 +36,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run the AgentHansa cycle
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run Hansa cycle
+        id: cycle
         env:
           HANSA_API_KEY: ${{ secrets.HANSA_API_KEY }}
           HANSA_AGENT_ID: ${{ secrets.HANSA_AGENT_ID }}
+          AGENT_NAME: ${{ github.event.repository.name }}
         run: |
           set -uo pipefail
-          # The script never raises on an unsolvable challenge: it reports it,
-          # so the run still delivers a readable message instead of a blank fail.
-          python3 scripts/hansa_cycle.py > /tmp/cycle.txt 2>/tmp/cycle_err.txt
-          rc=$?
-          echo "cycle_exit=$rc"
-          [ -s /tmp/cycle_err.txt ] && cat /tmp/cycle_err.txt
-          {
-            echo "### AgentHansa cycle"
-            echo
-            if [ "$rc" -ne 0 ]; then echo "_script exit code: ${rc}_"; echo; fi
-            echo '```'
-            tail -c 3400 /tmp/cycle.txt
-            echo '```'
-          } > /tmp/msg.txt
-          cat /tmp/msg.txt
+          python3 scripts/hansa_cycle.py > /tmp/report.md 2>/tmp/err.txt
+          echo "exit=$?"
+          echo "--- report ---"
+          cat /tmp/report.md
+          if [ -s /tmp/err.txt ]; then echo "--- stderr ---"; tail -20 /tmp/err.txt; fi
 
-      - name: Send the report to Telegram
+      - name: Send report to Telegram
+        if: always()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python3 scripts/notify.py /tmp/msg.txt "AgentHansa" || true
+        run: |
+          python3 scripts/notify.py /tmp/report.md "${{ github.event.repository.name }} · Hansa" || true
 
-      - name: Keep the report in the repo
+      - name: Commit report
         if: always()
         run: |
           set -uo pipefail
           mkdir -p hansa
-          cp /tmp/cycle.txt "hansa/$(date -u +%Y-%m-%dT%H-%MZ).txt"
-          git config user.name  "hansa-bot"
-          git config user.email "hansa-bot@users.noreply.github.com"
-          git add hansa
-          git diff --cached --quiet && { echo "nothing to commit"; exit 0; } || true
-          git commit -q -m "hansa: cycle $(date -u +%Y-%m-%dT%H:%MZ)"
-          git push
+          cp /tmp/report.md "hansa/$(date -u +%Y-%m-%dT%H).md" 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add hansa/ 2>/dev/null || true
+          git commit -q -m "hansa: cycle $(date -u +%Y-%m-%dT%H:%MZ)" || echo "nothing to commit"
+          git pull --rebase -q origin "${GITHUB_REF_NAME}" || true
+          git push -q || echo "push skipped"
