@@ -53,35 +53,39 @@ jobs:
 
       - name: FluxA wallet
         continue-on-error: true
-        env:
-          WALLET_LINK: ${{ vars.HANSA_WALLET_LINK }}
         run: |
           set -uo pipefail
-          : > /tmp/wallet.md
-          echo "*- FluxA wallet*" >> /tmp/wallet.md
-          W=/tmp/wallet.txt
           ID=memory/fluxa-agent-id.txt
           mkdir -p memory
+          REG=""
+          # Registering straight against the documented FluxA Agent ID API.
+          # The npx CLI produced ids that FluxA itself answered 404 for, and it
+          # only ever printed an add-agent URL whose approval ties the agent to
+          # the operator's single wallet - which Hansa rejects with 409 for the
+          # second agent onward. One API call per agent gives each its own id.
+          # Guarded: a second registration would mint a new id and orphan the
+          # wallet the previous one points at.
           if [ ! -s "$ID" ] || ! grep -qE '^[0-9a-fA-F-]{36}$' "$ID"; then
-            # init mints a fresh FluxA agent wallet. Run once per agent; a
-            # second init would mint a NEW id and orphan the previous one.
-            timeout 150 npx --yes @fluxa-pay/fluxa-wallet@latest init \
-              --name "${{ github.event.repository.name }}" \
-              --client "github-actions" > "$W" 2>&1 || true
-            if [ "${WALLET_LINK:-0}" = "1" ]; then
-              timeout 150 npx --yes @fluxa-pay/fluxa-wallet@latest link-wallet >> "$W" 2>&1 || true
-            fi
-            FOUND=$(grep -oE 'agentId=[0-9a-fA-F-]{36}' "$W" | head -1 | cut -d= -f2 || true)
-            [ -z "$FOUND" ] && FOUND=$(grep -oE '[0-9a-fA-F-]{36}' "$W" | head -1 || true)
+            REG=$(curl -sS --max-time 60 -X POST https://agentid.fluxapay.xyz/register \
+              -H "Content-Type: application/json" \
+              -d "{\"agent_name\":\"${{ github.event.repository.name }}\",\"client_info\":\"hansa-cycle/github-actions\"}" \
+              2>/dev/null || true)
+            FOUND=$(printf '%s' "$REG" | grep -oE '"agent_id"[[:space:]]*:[[:space:]]*"[0-9a-fA-F-]{36}"' \
+              | grep -oE '[0-9a-fA-F-]{36}' | head -1 || true)
             printf '%s' "${FOUND:-none}" > "$ID"
           else
-            echo "already initialised: $(cat "$ID")" > "$W"
+            FOUND=$(cat "$ID")
           fi
-          grep -oE 'https?://[^ "'"'"'<>]+' "$W" | sort -u | head -4 | while read -r u; do
-            echo "  - OPERATOR ACTION: $u" >> /tmp/wallet.md
-          done
-          sed -n '1,10p' "$W" | sed 's/^/  /' >> /tmp/wallet.md
-          echo "  - agent wallet id: $(cat "$ID")" >> /tmp/wallet.md
+          {
+            echo "*- FluxA wallet*"
+            echo "  - registered agent id: ${FOUND:-none}"
+            echo "  - token: held back on purpose (one-time secret; this repo is public)"
+            if [ -z "${FOUND:-}" ]; then
+              echo "  - register reply: $(printf '%s' "$REG" | sed -E 's/"(token|jwt)":"[^"]*"/"\\1":"REDACTED"/g' | head -c 300)"
+            fi
+            echo "  - WALLET_LINK note: approval-based linking is skipped; it "
+            echo "    collapses every agent onto one wallet, which Hansa rejects."
+          } > /tmp/wallet.md
           cat /tmp/wallet.md
 
       - name: Email bonus (one claim per agent)
