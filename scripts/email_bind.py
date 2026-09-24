@@ -125,7 +125,12 @@ def make_mailbox():
     domain = domains[0].get("domain") if isinstance(domains[0], dict) else None
     if not domain:
         return None, None, f"no usable domain in {short(domains[0], 120)}"
-    address = f"{NAME}-{int(time.time())}@{domain}".lower()
+    # mail.tm rejects both "-" and an over-long local part: "hermanworker
+    # 1790270469" (22 chars) came back 422 "The username ... is not valid",
+    # while "hansa1790270475" (15) was accepted. Keep a short alphanumeric
+    # prefix so the timestamp still fits.
+    local = re.sub(r"[^a-z0-9]", "", NAME.lower())[:6] or "agent"
+    address = f"{local}{int(time.time())}@{domain}"
     st, acc = call("POST", MAILTM + "/accounts",
                    {"address": address, "password": PASSWORD})
     if st not in (200, 201):
