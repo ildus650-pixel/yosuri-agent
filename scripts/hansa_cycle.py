@@ -263,6 +263,13 @@ def answer_challenge(question):
     t = question.lower()
     for w, n in WORDS.items():
         t = re.sub(r"\b" + w + r"\b", str(n), t)
+    # "two dozen" is a quantity, not the digit 2. Without this the fold read
+    # "a basket contains two dozen gems minus two" as 2 - 2 = 0 instead of
+    # 24 - 2 = 22, and "a dozen berries minus 1" as 1 instead of 11. Runs
+    # after the word map so "two dozen" has already become "2 dozen".
+    t = re.sub(r"\b(?:a|an|1)\s+dozen\b", "12", t)
+    t = re.sub(r"\b(\d+)\s+dozen\b", lambda m: str(int(m.group(1)) * 12), t)
+    t = re.sub(r"\bdozen\b", "12", t)
     # --- templates whose operands are NOT in reading order -----------------
     # "subtract 10 from 30"  -> 30 - 10 = 20 (not 10 - 30)
     m = re.search(r"subtract\s+(\d+)\s+from\s+(\d+)", t)
@@ -276,6 +283,35 @@ def answer_challenge(question):
     m = re.search(r"from\s+(\d+)\s+to\s+(\d+)", t)
     if m:
         return int(m.group(2)) - int(m.group(1)) + 1
+    # "split 29 coins into groups of 3 - how many are left over?" asks for the
+    # REMAINDER. The general fold instead saw the word "left" (a SUB stem) and
+    # added: 32 for 29 + 3, 18 for 11 + 7. Grouping questions are a
+    # divide-family template, so they are answered here.
+    gq = re.search(r"\binto\s+groups?\s+of\s+(\d+)", t)
+    if gq:
+        gs = [int(x) for x in re.findall(r"\d+", t)]
+        if gs:
+            size = int(gq.group(1))
+            if re.search(r"\b(?:left\s+over|leftover|remaining|remains?|remainder|left)\b", t):
+                return gs[0] % size
+            if re.search(r"how many groups", t):
+                return gs[0] // size
+    # "A cat has 10 mushrooms. A pirate has twice as many." -> 2x the number
+    # already on the table. The unary scan only reads 28 characters past each
+    # number, so "twice" fell outside the window and the answer stayed 10
+    # instead of 20 (the same template passed when the nouns were shorter).
+    tm = re.search(r"\b(twice|thrice|\d+\s+times)\s+as\s+many\b", t)
+    if tm:
+        ts = [int(x) for x in re.findall(r"\d+", t)]
+        if ts:
+            w = tm.group(1)
+            if w == "twice":
+                factor = 2
+            elif w == "thrice":
+                factor = 3
+            else:
+                factor = int(w.split()[0])
+            return ts[0] * factor
     # "15 apples are split evenly among 5 foxes, how many per fox?" -> divide
     if re.search(r"split evenly|divided (?:evenly )?among|"
                  r"shared (?:equally )?among|distributed among", t):
